@@ -1,0 +1,134 @@
+connex — mode d'emploi pour les agents (Claude Code, Codex)
+
+connex montre, depuis le laptop de l'utilisateur, ce qui tourne sur ses machines Linux
+(laptop, VPS, Raspberry Pi) : ports en écoute, dépôts git, sessions d'agents, applis
+inscrites. Ce guide te dit comment lire ce qu'il voit, l'expliquer à l'utilisateur, repérer
+ce qui tourne sans raison, et proposer de l'arrêter. Tu proposes ; c'est l'utilisateur qui
+décide.
+
+1. LIRE L'ÉTAT
+
+  connex ls --all --json
+      Toutes les machines de la configuration, une fois : une ligne JSON par machine.
+      Une machine joignable donne une ligne "type": "snapshot" (son relevé complet) ;
+      une machine injoignable, une ligne "type": "machine_status" avec
+      "reachable": false et "reason" (la cause de la coupure, en une ligne).
+  connex watch --json
+      Le direct : d'abord un "snapshot" par machine, puis des "patch" (champ
+      "changes" : op add, update ou remove ; kind listener, repo, agent ou app ; key ;
+      data) et des "machine_status" quand une machine tombe ou revient. Ctrl-C l'arrête.
+  connex ls --json
+      La machine locale seule. Sans --json, ls, ls --all et watch écrivent du texte
+      lisible : c'est ce texte que l'utilisateur voit ; le JSON est pour toi.
+
+  Chaque ligne porte "schema": 1. Des champs peuvent s'ajouter : ignore ceux que tu ne
+  connais pas.
+
+2. LE SENS DE CHAQUE CHAMP DU RELEVÉ
+
+  machine   name (nom Tailscale de la machine), os, arch, user (le compte qui lance
+            connex), tailscale_ip.
+  listeners un port TCP en écoute par entrée :
+    port, addr     le numéro et l'adresse d'écoute.
+    exposure       qui peut joindre ce port :
+                     loopback  la machine elle-même (127.0.0.1, ::1) ;
+                     host      la machine et ses conteneurs seulement : l'adresse d'une
+                               interface virtuelle (pont Docker docker0, br-…, virbr…) ;
+                               un VPN (lien point à point) ou un pont relié à une carte
+                               physique n'en est pas : il mène ailleurs ;
+                     tailnet   les machines du réseau Tailscale de l'utilisateur ;
+                     all       toutes les interfaces (0.0.0.0, ::) : joignable de
+                               l'extérieur, Internet compris sur le VPS si son pare-feu
+                               laisse passer ; ou publié sur Internet par Funnel.
+    funnel         true : Tailscale Funnel publie ce port sur Internet, pour n'importe
+                   qui ; exposure vaut alors all. Absent sinon.
+    mine           true si le processus est au compte de l'utilisateur (user de la machine).
+                   Pour un autre compte (mine: false), seuls port, addr, exposure, funnel
+                   et uid sont connus : c'est normal, pas une erreur.
+    uid, pid       le compte et le processus qui tient le port.
+    process        le nom court du processus (comm) ; parfois un nom de fil comme
+                   MainThread, qui ne dit rien.
+    unit           l'unité systemd (.service) qui contient le processus, si c'en est
+                   une : c'est le meilleur nom du programme.
+    exe            le nom de l'exécutable (node, python3.12…).
+    cwd, project_root
+                   le dossier du processus, et la racine du projet qui le contient
+                   (le premier dossier au-dessus qui a .git, go.mod, package.json,
+                   pyproject.toml ou Cargo.toml).
+  repos     un dépôt git par entrée :
+    path, branch, detached, worktrees (les autres dossiers de travail du dépôt).
+    dirty          true : fichiers modifiés ou non suivis ; false : propre ; null :
+                   inconnu.
+    upstream       la branche distante suivie (origin/main…) ; absent sans elle.
+    ahead          commits locaux pas encore poussés (« à pousser »).
+    behind         commits de la branche distante absents en local (« en retard »).
+                   ahead et behind valent null sans branche suivie, en tête détachée, ou
+                   quand la branche suivie n'existe plus (upstream présent, sans nombres).
+                   Limite : connex ne contacte jamais le dépôt distant (pas de fetch).
+                   behind compare avec la branche distante telle que connue au dernier
+                   fetch fait par l'utilisateur : il peut y avoir plus de retard en vrai.
+  agents    une session claude ou codex par entrée : tool, pid, cwd, state :
+                   working   l'agent travaille (il écrit sur son terminal) ;
+                   waiting   l'agent a fini ou pose une question : il attend l'utilisateur
+                             (l'écran dit « t'attend ») ;
+                   unknown   connex ne sait pas (pas de terminal lisible, ou statut
+                             Claude non reconnu) ;
+                   idle      ancien état : plus produit, mais un connex plus ancien sur une
+                             machine distante peut encore l'envoyer ; lis-le comme waiting.
+                   Pour Claude Code, l'état vient du champ status de
+                   ~/.claude/sessions/<pid>.json ; sinon de l'heure de la dernière
+                   écriture sur le terminal : 15 s ou moins, working ; plus, waiting.
+  apps      les applis inscrites par connex run : name, project, cwd, port, unit, state
+            (running, starting, stopped, failed), health (pid_alive, port_listening,
+            http : code de la dernière sonde, 0 sans réponse), view (remote : ouverte
+            par Tailscale ; train : par le miroir apercu-vps).
+  errors    ce qui n'a pas pu être lu (source, message) : le relevé est quand même
+            produit. Dis-le à l'utilisateur s'il en demande la raison.
+
+3. LES ACTIONS ET CE QU'ELLES FONT VRAIMENT
+
+  connex start <nom> [--on MACHINE]     démarre une appli inscrite (son unité systemd).
+  connex stop <nom> [--on MACHINE]      arrête une appli inscrite ; elle reste inscrite.
+  connex restart <nom> [--on MACHINE]   l'arrête puis la relance.
+  connex free <port> [--on MACHINE]     arrête le processus qui tient le port : SIGTERM,
+                                        puis SIGKILL s'il tient encore. Pour une appli
+                                        connex, arrête son unité. Refusé pour un autre
+                                        compte, un agent, systemd ou connex lui-même.
+  connex rm <nom>                       arrête et désinscrit une appli, sur la machine
+                                        où on le tape seulement.
+  connex open <nom> [--on MACHINE]      ouvre l'appli dans le navigateur du laptop.
+  --on MACHINE agit sur une autre machine de la configuration (nom Tailscale), par le
+  flux SSH que connex ouvre lui-même. Sans --on : la machine locale.
+  Exemples : connex stop site --on vps-40517391 ; connex free 3000 --on abc-desktop
+
+4. LES RÈGLES D'UN AGENT
+
+  - Ne jamais arrêter un processus qui n'est pas à l'utilisateur (mine: false). connex le
+    refuse de toute façon ; ne cherche pas à contourner (kill, sudo).
+  - Toujours demander à l'utilisateur avant stop, free, restart ou rm, et attendre son oui.
+    Dans la question, dis ce qui sera arrêté (programme, port, pid), où (la machine),
+    et pourquoi tu le crois inutile (par exemple : aucun agent ni appli dans ce
+    dossier, projet sans commit depuis longtemps, port ouvert à tous sans raison).
+  - Ne jamais lire la ligne de commande d'un processus (/proc/<pid>/cmdline), son
+    environnement, ni le contenu d'une conversation d'agent pour « en savoir plus » :
+    ils peuvent contenir des secrets. Contente-toi de ce que donne connex.
+  - Ne jamais lancer toi-même tailscale funnel, tailscale serve, git fetch ou git push
+    pour « vérifier » : pose la question à l'utilisateur.
+
+5. EXPLIQUER UN ÉCRAN À L'UTILISATEUR
+
+  - Par machine : combien de ports, et qui les tient (programme : unit sans .service,
+    sinon exe si process est un nom de fil, sinon process ; ou « autre compte, uid N »).
+  - Ce qui est ouvert à tous (exposure all), et pourquoi : écoute sur 0.0.0.0 ou ::, ou
+    Funnel (funnel: true, publié sur Internet). Sur le VPS c'est Internet ; host et
+    loopback ne sortent pas de la machine ; tailnet ne sort pas du réseau Tailscale.
+  - Les agents qui l'attendent (waiting) et dans quel dossier ; les dépôts modifiés,
+    à pousser (ahead) ou en retard (behind, depuis le dernier fetch).
+  - Ce qui semble tourner sans raison : un port de l'utilisateur sans appli inscrite ni
+    agent dans son projet, un vieux serveur de dev, un port ouvert à tous inattendu.
+    Propose l'action, et demande avant.
+
+  Exemple de lecture : « Sur le VPS, 12 ports : 9 à toi, 3 à d'autres comptes. Le
+  port 3000 (next-server, ~/projets/x) écoute sur 0.0.0.0 : il est ouvert à tous.
+  Aucun agent ne travaille dans ce projet. Veux-tu que je l'arrête avec
+  connex free 3000 --on vps-40517391 ? »
